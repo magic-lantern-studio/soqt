@@ -89,6 +89,7 @@ include(GNUInstallDirs)
 option(SO${GUI}_VERBOSE "Verbose build " OFF)
 option(COIN_IV_EXTENSIONS "Enable extra Open Inventor extensions" ON)
 option(SO${GUI}_BUILD_SHARED_LIBS "Build shared libraries" ON)
+option(SO${GUI}_USE_QT6 "Prefer Qt6 over Qt5 if available" ON)
 option(SO${GUI}_USE_QT5 "Prefer Qt5 over Qt4 if available" ON)
 option(WITH_STATIC_DEFAULTS "Enable statically linked in default materials" ON)
 option(HAVE_SPACENAV_SUPPORT "Enable Space Navigator support" ON)
@@ -100,6 +101,7 @@ cmake_dependent_option(SO${GUI}_BUILD_DOC_MAN "Build So${Gui} man pages." OFF "S
 cmake_dependent_option(SO${GUI}_BUILD_DOC_QTHELP "Build QtHelp documentation." OFF "SO${GUI}_BUILD_DOCUMENTATION" OFF)
 cmake_dependent_option(SO${GUI}_BUILD_DOC_CHM "Build compressed HTML help manual (requires HTML help compiler)" OFF "SO${GUI}_BUILD_DOCUMENTATION" OFF)
 
+cmake_dependent_option(SO${GUI}_BUILD_MAC_X11 "Prefer Qt/X11 over Qt/Mac linkage" OFF "APPLE" OFF)
 cmake_dependent_option(SO${GUI}_BUILD_MAC_FRAMEWORK "Build framework instead of dylib on Mac OS X when ON. Only valid if SO${GUI}_BUILD_SHARED_LIBS is ON." OFF "APPLE;NOT IOS;SO${GUI}_BUILD_SHARED_LIBS" OFF)
 
 report_prepare(
@@ -114,6 +116,7 @@ report_prepare(
   SO${GUI}_BUILD_DOC_QTHELP
   SO${GUI}_BUILD_DOC_CHM
   IF_APPLE
+    SO${GUI}_BUILD_MAC_X11
     SO${GUI}_BUILD_MAC_FRAMEWORK
 )
 
@@ -128,25 +131,55 @@ find_package(Coin REQUIRED)
 
 set(SO${GUI}_PKG_DEPS "Coin")
 
-if(SO${GUI}_USE_QT5)
+if(SO${GUI}_USE_QT6)
+  find_package(Qt6 COMPONENTS Core Gui OpenGL Widgets QUIET)
+endif()
+
+if(NOT Qt6_FOUND AND SO${GUI}_USE_QT5)
   find_package(Qt5 COMPONENTS Core Gui OpenGL Widgets QUIET)
 endif()
 
-if(Qt5_FOUND)
+if(NOT Qt6_FOUND AND NOT Qt5_FOUND)
+  set(QT_USE_IMPORTED_TARGETS ON)
+  find_package(Qt4 COMPONENTS QtCore QtGui QtOpenGL REQUIRED)
+endif()
+
+if(Qt6_FOUND)
+  set(SOQT_QT_TARGETS Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::Widgets)
+  set(QT_VERSION_MAJOR ${Qt6_VERSION_MAJOR})
+  set(QT_VERSION_MINOR ${Qt6_VERSION_MINOR})
+  set(QT_VERSION_PATCH ${Qt6_VERSION_PATCH})
+  set(SO${GUI}_PKG_DEPS "${SO${GUI}_PKG_DEPS} Qt6Core Qt6Gui Qt6OpenGL Qt6Widgets")
+  set(QT_QTCORE_INCLUDE_DIR ${Qt6Core_INCLUDE_DIRS})
+elseif(Qt5_FOUND)
   set(SOQT_QT_TARGETS Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL)
   string(REGEX REPLACE "^([0-9]+)\\.[0-9]+\\.[0-9]+.*" "\\1" QT_VERSION_MAJOR "${Qt5Core_VERSION_STRING}")
   string(REGEX REPLACE "^[0-9]+\\.([0-9]+)\\.[0-9]+.*" "\\1" QT_VERSION_MINOR "${Qt5Core_VERSION_STRING}")
   string(REGEX REPLACE "^[0-9]+\\.[0-9]+\\.([0-9]+).*" "\\1" QT_VERSION_PATCH "${Qt5Core_VERSION_STRING}")
   set(SO${GUI}_PKG_DEPS "${SO${GUI}_PKG_DEPS} Qt5Core Qt5Gui Qt5OpenGL Qt5Widgets")
-else()
-  set(QT_USE_IMPORTED_TARGETS ON)
-  find_package(Qt4 COMPONENTS QtCore QtGui QtOpenGL REQUIRED)
+  set(QT_QTCORE_INCLUDE_DIR ${Qt5Core_INCLUDE_DIRS})
+elseif(Qt4_FOUND)
   set(SO${GUI}_QT_TARGETS Qt4::QtCore Qt4::QtGui Qt4::QtOpenGL)
   include(${QT_USE_FILE})
   set(SO${GUI}_PKG_DEPS "${SO${GUI}_PKG_DEPS} QtCore QtGui QtOpenGL")
 endif()
 
-find_package(X11)
+if((UNIX AND NOT APPLE) OR (APPLE AND ${SO${GUI}_BUILD_MAC_X11}))
+  find_package(X11)
+  if(X11_FOUND)
+    if(X11_Xext_FOUND)
+      list(APPEND SOQT_X11_INCLUDE_DIRECTORIES ${X11_Xext_INCLUDE_DIR})
+      list(APPEND SOQT_X11_LIBRARIES ${X11_Xext_LIB})
+    endif()
+    if(X11_Xi_FOUND)
+      list(APPEND SOQT_X11_INCLUDE_DIRECTORIES ${X11_Xi_INCLUDE_DIR})
+      list(APPEND SOQT_X11_LIBRARIES ${X11_Xi_LIB})
+    endif()
+  
+    list(APPEND SOQT_X11_INCLUDE_DIRECTORIES ${X11_INCLUDE_DIR})
+    list(APPEND SOQT_X11_LIBRARIES ${X11_LIBRARIES})
+  endif()
+endif()
 
 # ##########################################################################
 # Setup build environment
@@ -363,22 +396,24 @@ if(HAVE_WINDOWS_H)
       return 0;
     }
   " HAVE_WIN32_API)
-  check_symbol_exists(LoadLibrary windows.h HAVE_WIN32_LOADLIBRARY)
+  check_symbol_exists(LoadLibraryA windows.h HAVE_WIN32_LOADLIBRARY)
   if(HAVE_WIN32_LOADLIBRARY)
     set(HAVE_DYNAMIC_LINKING 1)
   endif()
-  check_symbol_exists(GetEnvironmentVariable windows.h HAVE_GETENVIRONMENTVARIABLE)
+  check_symbol_exists(GetEnvironmentVariableA windows.h HAVE_GETENVIRONMENTVARIABLE)
 endif()
 set(USE_EXCEPTIONS ON)
 set(HAVE_JOYSTICK_LINUX OFF)
-check_include_files(X11/Xlib.h HAVE_X11_AVAILABLE)
-if(HAVE_X11_AVAILABLE)
-  set(X_DISPLAY_MISSING 0)
-  check_include_files(X11/extensions/SGIMisc.h HAVE_X11_EXTENSIONS_SGIMISC_H)
-  check_include_files(X11/extensions/XInput.h HAVE_X11_EXTENSIONS_XINPUT_H)
-  check_include_files(X11/Xproto.h HAVE_X11_XPROTO_H)
-else()
-  set(X_DISPLAY_MISSING 1)
+if(X11_FOUND)
+  check_include_files(X11/Xlib.h HAVE_X11_AVAILABLE)
+  if(HAVE_X11_AVAILABLE)
+    set(X_DISPLAY_MISSING 0)
+    check_include_files(X11/extensions/SGIMisc.h HAVE_X11_EXTENSIONS_SGIMISC_H)
+    check_include_files(X11/extensions/XInput.h HAVE_X11_EXTENSIONS_XINPUT_H)
+    check_include_files(X11/Xproto.h HAVE_X11_XPROTO_H)
+  else()
+    set(X_DISPLAY_MISSING 1)
+  endif()
 endif()
 
 unset(CMAKE_REQUIRED_INCLUDES)
